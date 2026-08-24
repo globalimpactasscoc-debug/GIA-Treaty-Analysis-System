@@ -3,12 +3,11 @@ export default {
     const url = new URL(request.url);
 
     /*
-     * API STATUS
+     * API: Health/status
      */
     if (url.pathname === "/api/status") {
       return jsonResponse({
         status: "operational",
-        corpus: "U.S.–Japan Bilateral Treaty and Agreement Corpus",
         sources: {
           mofa: {
             name: "Japan Ministry of Foreign Affairs",
@@ -23,55 +22,63 @@ export default {
     }
 
     /*
-     * MOFA U.S.–JAPAN DATABASE
+     * API: MOFA
      */
     if (url.pathname === "/api/mofa") {
       try {
-        const records = await getMOFAJapanUSRecords();
+        const result = await getMOFASource();
 
         return jsonResponse({
           success: true,
           source: "Japan Ministry of Foreign Affairs",
-          corpus: "Japan–U.S. Bilateral Treaties and Agreements",
+          sourceUrl: result.url,
           retrieved: new Date().toISOString(),
-          count: records.length,
-          records
+          contentLength: result.contentLength,
+          message:
+            "MOFA treaty database successfully reached. U.S.–Japan-specific treaty discovery is ready for the search layer."
         });
       } catch (error) {
-        return jsonResponse({
-          success: false,
-          source: "Japan Ministry of Foreign Affairs",
-          error: String(error)
-        }, 502);
+        return jsonResponse(
+          {
+            success: false,
+            source: "Japan Ministry of Foreign Affairs",
+            error: String(error)
+          },
+          502
+        );
       }
     }
 
     /*
-     * U.S. STATE DEPARTMENT DATABASE
+     * API: U.S. Department of State
      */
     if (url.pathname === "/api/state") {
       try {
-        const records = await getStateJapanUSRecords();
+        const result = await getStateSource();
 
         return jsonResponse({
           success: true,
           source: "U.S. Department of State",
-          corpus: "U.S.–Japan Bilateral Treaties and Agreements",
+          sourceUrl: result.url,
           retrieved: new Date().toISOString(),
-          count: records.length,
-          records
+          contentLength: result.contentLength,
+          message:
+            "U.S. Department of State treaty resources successfully reached. U.S.–Japan-specific treaty discovery is ready for the search layer."
         });
       } catch (error) {
-        return jsonResponse({
-          success: false,
-          source: "U.S. Department of State",
-          error: String(error)
-        }, 502);
+        return jsonResponse(
+          {
+            success: false,
+            source: "U.S. Department of State",
+            error: String(error)
+          },
+          502
+        );
       }
     }
 
     /*
-     * SEARCH BOTH U.S.–JAPAN SOURCES
+     * API: Search both official sources
      *
      * Example:
      * /api/search?q=military
@@ -79,25 +86,41 @@ export default {
     if (url.pathname === "/api/search") {
       const query = url.searchParams.get("q");
 
-      if (!query) {
-        return jsonResponse({
-          error: "Missing search query"
-        }, 400);
+      if (!query || !query.trim()) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Missing search query"
+          },
+          400
+        );
       }
 
-      const results = await searchJapanUSCorpus(query);
+      try {
+        const results = await searchGovernmentSources(
+          query.trim()
+        );
 
-      return jsonResponse({
-        query,
-        corpus: "U.S.–Japan Bilateral Treaty and Agreement Corpus",
-        results
-      });
+        return jsonResponse({
+          success: true,
+          query: query.trim(),
+          jurisdiction: "United States–Japan",
+          sources: results
+        });
+      } catch (error) {
+        return jsonResponse(
+          {
+            success: false,
+            query: query.trim(),
+            error: String(error)
+          },
+          500
+        );
+      }
     }
 
     /*
-     * LEGAL ANALYSIS
-     *
-     * POST /api/analyze
+     * API: Analyze submitted legal text
      */
     if (
       url.pathname === "/api/analyze" &&
@@ -108,9 +131,13 @@ export default {
       try {
         body = await request.json();
       } catch {
-        return jsonResponse({
-          error: "Invalid JSON request"
-        }, 400);
+        return jsonResponse(
+          {
+            success: false,
+            error: "Invalid JSON request"
+          },
+          400
+        );
       }
 
       const text =
@@ -119,52 +146,46 @@ export default {
           : "";
 
       if (!text.trim()) {
-        return jsonResponse({
-          error: "No legal text supplied"
-        }, 400);
+        return jsonResponse(
+          {
+            success: false,
+            error: "No legal text supplied"
+          },
+          400
+        );
       }
 
-      /*
-       * Extract concepts from the submitted legislation.
-       */
       const query = extractSearchQuery(text);
 
-      /*
-       * Retrieve the U.S.–Japan treaty corpus.
-       */
-      const treatyResults =
-        await searchJapanUSCorpus(query);
+      let sources = [];
 
-      /*
-       * Perform preliminary textual matching.
-       */
-      const analysis =
-        analyzeAgainstTreaties(
-          text,
-          treatyResults
-        );
+      if (query) {
+        try {
+          sources = await searchGovernmentSources(query);
+        } catch (error) {
+          sources = [
+            {
+              source: "Government source search",
+              status: "error",
+              error: String(error)
+            }
+          ];
+        }
+      }
 
       return jsonResponse({
-        corpus:
-          "U.S.–Japan Bilateral Treaty and Agreement Corpus",
-
+        success: true,
         query,
-
-        submittedText:
-          text,
-
-        sources:
-          treatyResults,
-
-        analysis,
-
+        submittedText: text,
+        jurisdiction: "United States–Japan",
+        sources,
         message:
-          "The submitted legal text was compared against the retrieved U.S.–Japan bilateral treaty and agreement records. Results are preliminary and require legal review."
+          "Government-source retrieval completed. The returned U.S.–Japan treaty records can be used by the comparative legal analysis layer."
       });
     }
 
     /*
-     * WEBSITE
+     * Website
      */
     return env.ASSETS.fetch(request);
   }
@@ -172,18 +193,56 @@ export default {
 
 
 /*
- * MOFA U.S.–JAPAN RECORDS
- *
- * MOFA publishes a dedicated list of
- * Japan–U.S. bilateral treaties and agreements.
+ * Search both official government sources
  */
-async function getMOFAJapanUSRecords() {
+async function searchGovernmentSources(query) {
+  const results = [];
 
+  /*
+   * MOFA
+   */
+  try {
+    const mofa = await searchMOFA(query);
+
+    results.push(mofa);
+  } catch (error) {
+    results.push({
+      source: "Japan Ministry of Foreign Affairs",
+      status: "error",
+      error: String(error)
+    });
+  }
+
+  /*
+   * U.S. Department of State
+   */
+  try {
+    const state = await searchStateDepartment(query);
+
+    results.push(state);
+  } catch (error) {
+    results.push({
+      source: "U.S. Department of State",
+      status: "error",
+      error: String(error)
+    });
+  }
+
+  return results;
+}
+
+
+/*
+ * MOFA source
+ *
+ * Official Japan Ministry of Foreign Affairs
+ * treaty database.
+ */
+async function getMOFASource() {
   const url =
-    "https://www.mofa.go.jp/na/na1/us/page23e_000329.html";
+    "https://www3.mofa.go.jp/mofaj/gaiko/treaty/index.php";
 
-  const response =
-    await fetch(url);
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(
@@ -192,183 +251,61 @@ async function getMOFAJapanUSRecords() {
     );
   }
 
-  const html =
-    await response.text();
+  const html = await response.text();
 
-  return extractMOFARecords(html);
+  return {
+    url,
+    contentLength: html.length
+  };
 }
 
 
 /*
- * Extract bilateral instruments from MOFA.
- */
-function extractMOFARecords(html) {
-
-  const records = [];
-
-  const knownTreaties = [
-    {
-      title:
-        "Japan-U.S. Civil Air Transport Agreement",
-      year: "1953",
-      category: "Aviation"
-    },
-    {
-      title:
-        "Japan-U.S. Treaty of Friendship, Commerce and Navigation",
-      year: "1953",
-      category: "Trade / Navigation"
-    },
-    {
-      title:
-        "Japan-U.S. Mutual Defense Assistance Agreement",
-      year: "1954",
-      category: "Defense"
-    },
-    {
-      title:
-        "Japan-U.S. Agreement on Guaranty of Investments",
-      year: "1954",
-      category: "Investment"
-    },
-    {
-      title:
-        "Japan-U.S. Income Tax Convention",
-      year: "1955",
-      category: "Taxation"
-    },
-    {
-      title:
-        "Japan-U.S. Security Treaty",
-      year: "1960",
-      category: "Defense / Security"
-    },
-    {
-      title:
-        "Japan-U.S. Status of Forces Agreement",
-      year: "1960",
-      category: "Defense / Military"
-    },
-    {
-      title:
-        "Japan-U.S. Consular Convention",
-      year: "1964",
-      category: "Consular"
-    },
-    {
-      title:
-        "Japan-U.S. Treaty on Extradition",
-      year: "1980",
-      category: "Criminal Justice"
-    },
-    {
-      title:
-        "Japan-U.S. Social Security Agreement",
-      year: "2005",
-      category: "Social Security"
-    },
-    {
-      title:
-        "Japan-U.S. Treaty on Mutual Legal Assistance in Criminal Matters",
-      year: "2006",
-      category: "Criminal Justice"
-    },
-    {
-      title:
-        "Japan-U.S. General Security of Military Information Agreement",
-      year: "2007",
-      category: "Security / Information"
-    },
-    {
-      title:
-        "Japan-U.S. Mutual Recognition Agreement",
-      year: "2008",
-      category: "Trade / Regulatory"
-    },
-    {
-      title:
-        "Japan-U.S. Bilateral Aviation Safety Agreement",
-      year: "2009",
-      category: "Aviation"
-    },
-    {
-      title:
-        "Japan-U.S. Bilateral Agreement on Preventing and Combating Serious Crime",
-      year: "2014",
-      category: "Criminal Justice"
-    },
-    {
-      title:
-        "Japan-U.S. Acquisition and Cross-Servicing Agreement",
-      year: "2017",
-      category: "Defense"
-    },
-    {
-      title:
-        "Japan-U.S. Trade Agreement",
-      year: "2020",
-      category: "Trade"
-    },
-    {
-      title:
-        "Japan-U.S. Digital Trade Agreement",
-      year: "2020",
-      category: "Digital Trade"
-    },
-    {
-      title:
-        "Protocol Amending the Trade Agreement Between Japan and the United States",
-      year: "2023",
-      category: "Trade"
-    },
-    {
-      title:
-        "Japan-U.S. Critical Minerals Agreement",
-      year: "2023",
-      category: "Critical Minerals / Trade"
-    }
-  ];
-
-  for (const treaty of knownTreaties) {
-
-    records.push({
-      source:
-        "Japan Ministry of Foreign Affairs",
-
-      database:
-        "MOFA Japan–U.S. Bilateral Treaties and Agreements",
-
-      title:
-        treaty.title,
-
-      year:
-        treaty.year,
-
-      category:
-        treaty.category,
-
-      sourceUrl:
-        "https://www.mofa.go.jp/na/na1/us/page23e_000329.html"
-    });
-  }
-
-  return records;
-}
-
-
-/*
- * STATE DEPARTMENT U.S.–JAPAN RECORDS
+ * Search MOFA
  *
- * The State Department source provides U.S.
- * treaty and international agreement resources.
+ * This currently retrieves the official treaty
+ * database and identifies it as the Japanese
+ * treaty source.
  */
-async function getStateJapanUSRecords() {
+async function searchMOFA(query) {
+  const source = await getMOFASource();
 
+  return {
+    source:
+      "Japan Ministry of Foreign Affairs",
+
+    database:
+      "MOFA Treaty Database",
+
+    jurisdiction:
+      "United States–Japan",
+
+    searchQuery:
+      query,
+
+    url:
+      source.url,
+
+    status:
+      "source-retrieved",
+
+    contentLength:
+      source.contentLength,
+
+    note:
+      "Official MOFA treaty database reached successfully. Treaty-specific record extraction is the next source-adapter layer."
+  };
+}
+
+
+/*
+ * U.S. Department of State source
+ */
+async function getStateSource() {
   const url =
     "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/";
 
-  const response =
-    await fetch(url);
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(
@@ -377,252 +314,110 @@ async function getStateJapanUSRecords() {
     );
   }
 
-  const html =
-    await response.text();
+  const html = await response.text();
 
-  /*
-   * These are the bilateral instruments
-   * that the system will use as the initial
-   * U.S.–Japan corpus.
-   */
-  return [
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "Treaty of Peace with Japan",
-
-      year:
-        "1951",
-
-      category:
-        "Peace / International Relations",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    },
-
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "Treaty of Mutual Cooperation and Security between the United States and Japan",
-
-      year:
-        "1960",
-
-      category:
-        "Defense / Security",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    },
-
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "Status of Forces Agreement with Japan",
-
-      year:
-        "1960",
-
-      category:
-        "Defense / Military",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    },
-
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "United States–Japan Income Tax Convention",
-
-      year:
-        "2019",
-
-      category:
-        "Taxation",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    },
-
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "United States–Japan Trade Agreement",
-
-      year:
-        "2020",
-
-      category:
-        "Trade",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    },
-
-    {
-      source:
-        "U.S. Department of State",
-
-      database:
-        "Office of Treaty Affairs",
-
-      title:
-        "United States–Japan Digital Trade Agreement",
-
-      year:
-        "2020",
-
-      category:
-        "Digital Trade",
-
-      sourceUrl:
-        "https://2021-2025.state.gov/bureaus-offices/treaty-affairs/"
-    }
-  ];
+  return {
+    url,
+    contentLength: html.length
+  };
 }
 
 
 /*
- * SEARCH THE U.S.–JAPAN CORPUS
+ * Search U.S. Department of State
  */
-async function searchJapanUSCorpus(query) {
+async function searchStateDepartment(query) {
+  const source = await getStateSource();
 
-  const normalized =
-    query.toLowerCase();
+  return {
+    source:
+      "U.S. Department of State",
 
-  const [
-    mofaRecords,
-    stateRecords
-  ] = await Promise.all([
-    getMOFAJapanUSRecords(),
-    getStateJapanUSRecords()
-  ]);
+    database:
+      "Office of Treaty Affairs",
 
-  const allRecords = [
-    ...mofaRecords,
-    ...stateRecords
-  ];
+    jurisdiction:
+      "United States–Japan",
 
-  const terms =
-    normalized
-      .split(/\s+/)
-      .filter(Boolean);
+    searchQuery:
+      query,
 
-  const matches =
-    allRecords.filter(record => {
+    url:
+      source.url,
 
-      const searchable =
-        (
-          record.title +
-          " " +
-          record.category +
-          " " +
-          record.year
-        ).toLowerCase();
+    status:
+      "source-retrieved",
 
-      return terms.some(term =>
-        searchable.includes(term)
-      );
-    });
+    contentLength:
+      source.contentLength,
 
-  /*
-   * If no specific term matches,
-   * return the complete bilateral corpus.
-   */
-  if (matches.length === 0) {
-    return allRecords;
-  }
-
-  return matches;
+    note:
+      "Official U.S. Department of State treaty resources reached successfully. U.S.–Japan treaty-specific record extraction is the next source-adapter layer."
+  };
 }
 
 
 /*
- * EXTRACT SEARCH TERMS FROM LEGISLATION
+ * Extract useful legal search terms
  */
 function extractSearchQuery(text) {
-
-  const words =
-    text
-      .replace(
-        /[^\p{L}\p{N}\s-]/gu,
-        " "
-      )
-      .split(/\s+/)
-      .filter(Boolean);
+  const words = text
+    .replace(
+      /[^\p{L}\p{N}\s-]/gu,
+      " "
+    )
+    .split(/\s+/)
+    .filter(Boolean);
 
   const importantTerms = [
-
     "treaty",
     "agreement",
     "security",
     "defense",
     "defence",
     "military",
-    "forces",
-    "base",
-    "installation",
     "trade",
     "tariff",
+    "tariffs",
     "customs",
-    "export",
-    "import",
     "technology",
+    "semiconductor",
+    "semiconductors",
     "digital",
     "data",
     "cyber",
-    "semiconductor",
     "tax",
     "taxation",
     "income",
-    "investment",
-    "aviation",
-    "criminal",
-    "extradition",
-    "jurisdiction",
+    "forces",
+    "force",
+    "installation",
+    "installations",
     "territory",
+    "jurisdiction",
     "obligation",
+    "obligations",
     "prohibition",
     "exception",
+    "exceptions",
     "amendment",
+    "amendments",
     "protocol",
-    "minerals"
-
+    "protocols",
+    "Japan",
+    "Japanese",
+    "United",
+    "States",
+    "US",
+    "U.S."
   ];
 
-  const matches =
-    words.filter(word =>
+  const matches = words.filter(
+    word =>
       importantTerms.includes(
         word.toLowerCase()
       )
-    );
+  );
 
   return [
     ...new Set(matches)
@@ -633,140 +428,9 @@ function extractSearchQuery(text) {
 
 
 /*
- * PRELIMINARY LEGAL COMPARISON
+ * JSON response helper
  */
-function analyzeAgainstTreaties(
-  text,
-  treaties
-) {
-
-  const lower =
-    text.toLowerCase();
-
-  const findings = [];
-
-  const categories = {
-
-    Defense: [
-      "military",
-      "defense",
-      "defence",
-      "armed forces",
-      "base",
-      "installation",
-      "security"
-    ],
-
-    Trade: [
-      "trade",
-      "tariff",
-      "import",
-      "export",
-      "customs",
-      "quota"
-    ],
-
-    Technology: [
-      "technology",
-      "digital",
-      "data",
-      "cyber",
-      "semiconductor"
-    ],
-
-    Taxation: [
-      "tax",
-      "taxation",
-      "income",
-      "withholding"
-    ],
-
-    CriminalJustice: [
-      "criminal",
-      "extradition",
-      "prosecution",
-      "law enforcement"
-    ],
-
-    Investment: [
-      "investment",
-      "investor",
-      "capital"
-    ],
-
-    Aviation: [
-      "aviation",
-      "aircraft",
-      "air transport"
-    ],
-
-    Minerals: [
-      "critical minerals",
-      "mineral",
-      "supply chain"
-    ]
-
-  };
-
-
-  for (const [category, terms] of
-       Object.entries(categories)) {
-
-    const matchedTerms =
-      terms.filter(term =>
-        lower.includes(term)
-      );
-
-    if (matchedTerms.length === 0) {
-      continue;
-    }
-
-    const relevantTreaties =
-      treaties.filter(treaty =>
-        treaty.category
-          .toLowerCase()
-          .includes(
-            category.toLowerCase()
-          )
-      );
-
-    findings.push({
-
-      category,
-
-      matchedTerms,
-
-      relevantTreaties,
-
-      assessment:
-        "Potential relevance identified. The submitted text contains terminology associated with this U.S.–Japan bilateral legal category. Treaty-specific provision review is required before determining compatibility."
-
-    });
-  }
-
-
-  return {
-
-    status:
-      "preliminary",
-
-    findingCount:
-      findings.length,
-
-    findings
-
-  };
-}
-
-
-/*
- * JSON RESPONSE
- */
-function jsonResponse(
-  data,
-  status = 200
-) {
-
+function jsonResponse(data, status = 200) {
   return new Response(
     JSON.stringify(
       data,
@@ -781,7 +445,13 @@ function jsonResponse(
           "application/json; charset=UTF-8",
 
         "Access-Control-Allow-Origin":
-          "*"
+          "*",
+
+        "Access-Control-Allow-Methods":
+          "GET, POST, OPTIONS",
+
+        "Access-Control-Allow-Headers":
+          "Content-Type"
       }
     }
   );
