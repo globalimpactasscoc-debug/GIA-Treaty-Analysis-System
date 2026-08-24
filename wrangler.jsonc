@@ -1,14 +1,11 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "gia-treaty-analysis-system",
-  "main": "./worker.js",
+  "main": "src/index.js",
   "compatibility_date": "2026-08-24",
-
   "assets": {
-    "directory": ".",
+    "directory": "./",
     "binding": "ASSETS",
-    "run_worker_first": [
-      "/api/*"
-    ]
+    "run_worker_first": ["/api/*"]
   }
 }
